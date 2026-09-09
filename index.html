@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0E1217" />
+  <title>Catalogue JCC Pokémon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #0E1217; }
+    body { font-family: 'Outfit', system-ui, sans-serif; }
+    .tile { transition: border-color .15s ease, transform .15s ease; }
+    .tile:hover { border-color: #E7B85C; transform: translateY(-2px); }
+    input::placeholder { color: #8B95A6; }
+    @media (prefers-reduced-motion: reduce) { .tile { transition: none; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useCallback } = React;
+
+    const C = {
+      ink: "#0E1217", panel: "#171C24", panel2: "#1E2530", line: "#2A323F",
+      text: "#ECEFF4", muted: "#8B95A6", gold: "#E7B85C",
+      goldSoft: "rgba(231,184,92,0.14)", base: "#6FA8DC", green: "#63C08A",
+    };
+    const API = "https://api.tcgdex.net/v2/fr";
+
+    const norm = (s) => (s || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const officialOf = (s) => s?.cardCount?.official ?? 0;
+    const totalOf = (s) => s?.cardCount?.total ?? 0;
+    const secretsOf = (s) => Math.max(0, totalOf(s) - officialOf(s));
+    const isSecretCard = (card, official) => {
+      const n = parseInt(card.localId, 10);
+      if (Number.isNaN(n)) return true;
+      return official > 0 && n > official;
+    };
+
+    const money = (x) => x.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    function extractPrice(pricing) {
+      if (!pricing) return null;
+      const cm = pricing.cardmarket;
+      if (cm) {
+        const cand = ["low", "avg1", "trend", "avg", "avg7", "avg30"].map((k) => cm[k]).filter((v) => typeof v === "number" && v > 0);
+        if (cand.length) {
+          const low = Math.min(...cand), high = Math.max(...cand);
+          return { low, high, value: cm.trend ?? cm.avg ?? high, cur: "€", src: "Cardmarket" };
+        }
+      }
+      const tp = pricing.tcgplayer;
+      if (tp) {
+        const nums = [];
+        const scan = (o) => { if (o && typeof o === "object") Object.values(o).forEach((v) => typeof v === "number" ? nums.push(v) : scan(v)); };
+        scan(tp);
+        const valid = nums.filter((v) => v > 0);
+        if (valid.length) {
+          const low = Math.min(...valid), high = Math.max(...valid);
+          return { low, high, value: high, cur: "$", src: "TCGplayer" };
+        }
+      }
+      return null;
+    }
+
+    const loadCollection = () => {
+      try { return JSON.parse(localStorage.getItem("collection") || "{}"); } catch { return {}; }
+    };
+    const saveCollection = (c) => {
+      try { localStorage.setItem("collection", JSON.stringify(c)); } catch {}
+    };
+
+    function Stat({ value, label, color }) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 74 }}>
+          <span style={{ fontSize: 24, fontWeight: 700, color: color || C.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+            {value.toLocaleString("fr-FR")}
+          </span>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{label}</span>
+        </div>
+      );
+    }
+
+    function Qty({ qty, onChange }) {
+      const btn = { width: 34, height: 34, borderRadius: 9, border: `1px solid ${C.line}`, background: C.panel2,
+        color: C.text, fontSize: 18, cursor: "pointer", lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" };
+      return (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button style={btn} onClick={() => onChange(Math.max(0, qty - 1))} aria-label="retirer">−</button>
+          <span style={{ minWidth: 22, textAlign: "center", fontSize: 15, fontWeight: 700,
+                         color: qty > 0 ? C.text : C.muted, fontVariantNumeric: "tabular-nums" }}>{qty}</span>
+          <button style={{ ...btn, borderColor: C.green, color: C.green }} onClick={() => onChange(qty + 1)} aria-label="ajouter">+</button>
+        </div>
+      );
+    }
+
+    function PriceButton({ cardId, priceState, onFetch }) {
+      const st = priceState[cardId];
+      if (st === "loading") return <span style={{ fontSize: 11, color: C.muted }}>prix…</span>;
+      if (st === "none") return <span style={{ fontSize: 11, color: C.muted }}>prix indispo</span>;
+      if (st && typeof st === "object")
+        return <span style={{ fontSize: 12, color: C.gold, fontWeight: 700 }}>
+          {st.value.toFixed(2)} {st.cur}<span style={{ color: C.muted, fontWeight: 400 }}> · {st.src}</span>
+        </span>;
+      return <button onClick={() => onFetch(cardId)}
+        style={{ fontSize: 11, color: C.base, background: "none", border: "none", cursor: "pointer", padding: 0 }}>voir le prix</button>;
+    }
+
+    function CardCell({ card, secret, qty, onQty, priceState, onFetchPrice }) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ position: "relative", borderRadius: 10, overflow: "hidden",
+                        border: `1px solid ${qty > 0 ? C.green : secret ? C.gold : C.line}`, background: C.panel2, aspectRatio: "63/88" }}>
+            {card.image
+              ? <img src={`${card.image}/low.webp`} alt={card.name} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              : <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: C.muted, fontSize: 11, padding: 6, textAlign: "center" }}>pas d'image</div>}
+            {secret && <span style={{ position: "absolute", top: 6, left: 6, background: C.gold, color: "#1a1206", fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 6 }}>secrète</span>}
+            {qty > 1 && <span style={{ position: "absolute", top: 6, right: 6, background: C.green, color: "#06140c", fontSize: 11, fontWeight: 800, padding: "2px 7px", borderRadius: 6 }}>×{qty}</span>}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, fontVariantNumeric: "tabular-nums" }}>#{card.localId} · {card.name}</div>
+          <Qty qty={qty} onChange={(n) => onQty(card, n)} />
+          <PriceButton cardId={card.id} priceState={priceState} onFetch={onFetchPrice} />
+        </div>
+      );
+    }
+
+    const CARDS_GRID = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 14 };
+
+    function SetDetail({ set, onClose, collection, onQty, priceState, onFetchPrice }) {
+      const [detail, setDetail] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [filter, setFilter] = useState("toutes");
+
+      useEffect(() => {
+        let alive = true; setLoading(true); setError(null); setDetail(null);
+        (async () => {
+          try {
+            const r = await fetch(`${API}/sets/${set.id}`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (alive) { setDetail(data); setLoading(false); }
+          } catch (e) { if (alive) { setError(e.message || "réseau"); setLoading(false); } }
+        })();
+        return () => { alive = false; };
+      }, [set.id]);
+
+      const official = officialOf(detail || set);
+      const cards = detail?.cards || [];
+      const shown = cards.filter((c) => {
+        if (filter === "secretes") return isSecretCard(c, official);
+        if (filter === "possedees") return (collection[c.id]?.qty ?? 0) > 0;
+        return true;
+      });
+      const chip = (key, label) => (
+        <button onClick={() => setFilter(key)}
+          style={{ background: filter === key ? C.goldSoft : C.panel, color: filter === key ? C.gold : C.text,
+                   border: `1px solid ${filter === key ? C.gold : C.line}`, borderRadius: 999, padding: "6px 13px", cursor: "pointer", fontSize: 13 }}>{label}</button>
+      );
+
+      return (
+        <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex",
+             justifyContent: "center", alignItems: "flex-start", padding: 12, overflowY: "auto", zIndex: 50 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.ink, border: `1px solid ${C.line}`, borderRadius: 16, maxWidth: 900, width: "100%", padding: 18, margin: "16px 0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 20, fontWeight: 700 }}>{set.name}</div>
+                {detail?.serie?.name && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>Série {detail.serie.name}{detail.releaseDate ? ` — ${detail.releaseDate}` : ""}</div>}
+              </div>
+              <button onClick={onClose} style={{ background: C.panel2, border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, padding: "6px 12px", cursor: "pointer", fontSize: 14 }}>Fermer</button>
+            </div>
+            <div style={{ display: "flex", gap: 24, margin: "14px 0 16px", flexWrap: "wrap" }}>
+              <Stat value={official} label="collection de base" color={C.base} />
+              <Stat value={secretsOf(detail || set)} label="cartes secrètes" color={C.gold} />
+              <Stat value={totalOf(detail || set)} label="total" />
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              {chip("toutes", "Toutes")}{chip("possedees", "Mes cartes")}{chip("secretes", "Secrètes")}
+            </div>
+            {loading && <p style={{ color: C.muted }}>Chargement des cartes…</p>}
+            {error && <p style={{ color: C.muted }}>Les cartes de ce set n'ont pas pu être chargées (erreur : {error}). Réessaie dans un instant.</p>}
+            {!loading && !error && (
+              <div style={CARDS_GRID}>
+                {shown.map((c) => (
+                  <CardCell key={c.id} card={c} secret={isSecretCard(c, official)} qty={collection[c.id]?.qty ?? 0}
+                    onQty={(card, n) => onQty(card, n, { setId: set.id, setName: set.name, secret: isSecretCard(card, official) })}
+                    priceState={priceState} onFetchPrice={onFetchPrice} />
+                ))}
+                {shown.length === 0 && <p style={{ color: C.muted, gridColumn: "1 / -1" }}>Rien à afficher avec ce filtre.</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+    function SetTile({ s, ownedUnique, onOpen }) {
+      const [logoOk, setLogoOk] = useState(true);
+      const secrets = secretsOf(s); const off = officialOf(s);
+      const pct = off ? Math.min(100, Math.round((ownedUnique / off) * 100)) : 0;
+      return (
+        <button onClick={() => onOpen(s)} className="tile"
+          style={{ textAlign: "left", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, cursor: "pointer", color: C.text, display: "flex", flexDirection: "column", gap: 10, minHeight: 168 }}>
+          <div style={{ height: 50, display: "flex", alignItems: "center" }}>
+            {s.logo && logoOk ? <img src={`${s.logo}.png`} alt="" onError={() => setLogoOk(false)} style={{ maxHeight: 50, maxWidth: "100%", objectFit: "contain" }} />
+              : <span style={{ fontSize: 15, fontWeight: 600 }}>{s.name}</span>}
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.2 }}>{s.name}</div>
+          <div style={{ display: "flex", gap: 12, alignItems: "baseline", fontVariantNumeric: "tabular-nums" }}>
+            <span style={{ fontSize: 12.5, color: C.base }}>{off} base</span>
+            <span style={{ fontSize: 12.5, color: secrets ? C.gold : C.muted }}>{secrets} secr.</span>
+            <span style={{ fontSize: 11.5, color: C.muted, marginLeft: "auto" }}>{totalOf(s)} total</span>
+          </div>
+          <div style={{ marginTop: "auto" }}>
+            <div style={{ height: 5, background: C.panel2, borderRadius: 3, overflow: "hidden" }}>
+              <div style={{ width: `${pct}%`, height: "100%", background: ownedUnique ? C.green : "transparent" }} />
+            </div>
+            <div style={{ fontSize: 11, color: ownedUnique ? C.green : C.muted, marginTop: 4 }}>
+              {ownedUnique ? `${ownedUnique}/${off} possédées` : "aucune carte encore"}
+            </div>
+          </div>
+        </button>
+      );
+    }
+
+    function CollectionView({ collection, onOpenSetById, priceState, onFetchPrice, onQty }) {
+      const bySet = useMemo(() => {
+        const groups = {};
+        Object.entries(collection).forEach(([id, m]) => {
+          if (!m || m.qty <= 0) return;
+          const k = m.setId || "?";
+          (groups[k] = groups[k] || { name: m.setName || m.setId, items: [] }).items.push({ id, ...m });
+        });
+        Object.values(groups).forEach((g) => g.items.sort((a, b) => (parseInt(a.localId, 10) || 0) - (parseInt(b.localId, 10) || 0)));
+        return groups;
+      }, [collection]);
+      const keys = Object.keys(bySet);
+      if (keys.length === 0) {
+        return (
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 24, textAlign: "center" }}>
+            <p style={{ margin: 0, fontWeight: 600 }}>Ta collection est vide pour l'instant.</p>
+            <p style={{ margin: "8px 0 0", color: C.muted, fontSize: 14 }}>Va dans le Catalogue, ouvre un set, et utilise les boutons + pour compter tes cartes (les doublons comptent).</p>
+          </div>
+        );
+      }
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+          {keys.map((k) => (
+            <div key={k}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+                <h3 style={{ margin: 0, fontSize: 16 }}>{bySet[k].name}</h3>
+                <button onClick={() => onOpenSetById(k, bySet[k].name)} style={{ background: "none", border: "none", color: C.base, cursor: "pointer", fontSize: 13 }}>ouvrir le set</button>
+              </div>
+              <div style={CARDS_GRID}>
+                {bySet[k].items.map((it) => (
+                  <CardCell key={it.id} card={it} secret={it.secret} qty={it.qty}
+                    onQty={(card, n) => onQty({ id: it.id, localId: it.localId, name: it.name, image: it.image }, n, { setId: it.setId, setName: it.setName, secret: it.secret })}
+                    priceState={priceState} onFetchPrice={onFetchPrice} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function App() {
+      const [sets, setSets] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [query, setQuery] = useState("");
+      const [asc, setAsc] = useState(true);
+      const [tab, setTab] = useState("catalogue");
+      const [selected, setSelected] = useState(null);
+      const [collection, setCollection] = useState(loadCollection);
+      const [priceState, setPriceState] = useState({});
+
+      useEffect(() => {
+        let alive = true;
+        (async () => {
+          try {
+            const r = await fetch(`${API}/sets`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (alive) { setSets(Array.isArray(data) ? data : []); setLoading(false); }
+          } catch (e) { if (alive) { setError(e.message || "réseau"); setLoading(false); } }
+        })();
+        return () => { alive = false; };
+      }, []);
+
+      const setQty = useCallback((card, n, meta) => {
+        setCollection((prev) => {
+          const next = { ...prev };
+          if (n <= 0) delete next[card.id];
+          else next[card.id] = { qty: n, name: card.name, localId: card.localId, image: card.image, setId: meta.setId, setName: meta.setName, secret: !!meta.secret };
+          saveCollection(next);
+          return next;
+        });
+      }, []);
+
+      const fetchPrice = useCallback(async (cardId) => {
+        setPriceState((p) => ({ ...p, [cardId]: "loading" }));
+        try {
+          const r = await fetch(`${API}/cards/${cardId}`);
+          if (!r.ok) throw new Error();
+          const data = await r.json();
+          const price = extractPrice(data.pricing);
+          setPriceState((p) => ({ ...p, [cardId]: price || "none" }));
+        } catch { setPriceState((p) => ({ ...p, [cardId]: "none" })); }
+      }, []);
+
+      useEffect(() => {
+        Object.keys(collection).forEach((id) => {
+          if (collection[id] && collection[id].qty > 0 && priceState[id] === undefined) fetchPrice(id);
+        });
+      }, [collection]);
+
+      const ownedBySet = useMemo(() => {
+        const m = {};
+        Object.values(collection).forEach((v) => { if (v && v.qty > 0) m[v.setId] = (m[v.setId] || 0) + 1; });
+        return m;
+      }, [collection]);
+
+      const totals = useMemo(() => {
+        let owned = 0, unique = 0, secrets = 0, low = 0, high = 0, priced = 0, unpriced = 0;
+        Object.entries(collection).forEach(([id, v]) => {
+          if (!v || v.qty <= 0) return;
+          owned += v.qty; unique += 1;
+          if (v.secret) secrets += v.qty;
+          const p = priceState[id];
+          if (p && typeof p === "object" && p.cur === "€") { low += p.low * v.qty; high += p.high * v.qty; priced += 1; }
+          else { unpriced += 1; }
+        });
+        return { owned, unique, secrets, low, high, priced, unpriced };
+      }, [collection, priceState]);
+
+      const filtered = useMemo(() => {
+        const q = norm(query);
+        const list = sets.filter((s) => norm(s.name).includes(q));
+        list.sort((a, b) => a.name.localeCompare(b.name, "fr"));
+        if (!asc) list.reverse();
+        return list;
+      }, [sets, query, asc]);
+
+      const seg = (key, label) => (
+        <button onClick={() => setTab(key)} style={{ flex: 1, background: tab === key ? C.panel2 : "transparent", color: tab === key ? C.text : C.muted,
+          border: "none", borderRadius: 9, padding: "9px 0", cursor: "pointer", fontSize: 14, fontWeight: 600 }}>{label}</button>
+      );
+
+      return (
+        <div style={{ background: C.ink, minHeight: "100vh", color: C.text, padding: "20px 14px 48px" }}>
+          <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+            <header style={{ marginBottom: 16 }}>
+              <h1 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.02em" }}>Catalogue JCC Pokémon</h1>
+              <p style={{ color: C.muted, margin: "5px 0 0", fontSize: 13.5 }}>Tous les sets de A à Z, base et secrètes. Compte tes cartes, doublons inclus. Données TCGdex.</p>
+            </header>
+
+            <div style={{ display: "flex", gap: 4, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 4, marginBottom: 16 }}>
+              {seg("catalogue", "Catalogue")}
+              {seg("collection", `Ma collection${totals.unique ? ` (${totals.unique})` : ""}`)}
+            </div>
+
+            <div style={{ display: "flex", gap: 24, padding: "14px 16px", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, marginBottom: 18, flexWrap: "wrap" }}>
+              <Stat value={totals.owned} label="cartes en tout" color={C.green} />
+              <Stat value={totals.unique} label="cartes uniques" />
+              <Stat value={totals.secrets} label="secrètes" color={C.gold} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 130 }}>
+                <span style={{ fontSize: 20, fontWeight: 700, color: C.gold, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+                  {totals.priced ? `${money(totals.low)}–${money(totals.high)} €` : "—"}
+                </span>
+                <span style={{ fontSize: 11.5, color: C.muted }}>
+                  prix total (est.){totals.unpriced ? ` · ${totals.unpriced} sans cote` : ""}
+                </span>
+              </div>
+            </div>
+
+            {tab === "catalogue" && (
+              <>
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                  <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un set…"
+                    style={{ flex: "1 1 200px", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 14px", color: C.text, fontSize: 14, outline: "none" }} />
+                  <button onClick={() => setAsc((v) => !v)} style={{ background: C.panel, border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontSize: 14 }}>Tri {asc ? "A → Z" : "Z → A"}</button>
+                </div>
+                {loading && <p style={{ color: C.muted }}>Chargement de tous les sets…</p>}
+                {error && (
+                  <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 20 }}>
+                    <p style={{ margin: 0, fontWeight: 600 }}>Les données ne se chargent pas.</p>
+                    <p style={{ margin: "8px 0 0", color: C.muted, fontSize: 14, lineHeight: 1.5 }}>Vérifie ta connexion. L'appli récupère tout en direct depuis TCGdex (api.tcgdex.net). Détail : {error}.</p>
+                  </div>
+                )}
+                {!loading && !error && (
+                  <>
+                    <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>{filtered.length} set{filtered.length > 1 ? "s" : ""}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
+                      {filtered.map((s) => <SetTile key={s.id} s={s} ownedUnique={ownedBySet[s.id] || 0} onOpen={setSelected} />)}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {tab === "collection" && (
+              <CollectionView collection={collection} onOpenSetById={(id, name) => setSelected({ id, name })}
+                priceState={priceState} onFetchPrice={fetchPrice} onQty={setQty} />
+            )}
+          </div>
+
+          {selected && <SetDetail set={selected} onClose={() => setSelected(null)} collection={collection} onQty={setQty} priceState={priceState} onFetchPrice={fetchPrice} />}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
