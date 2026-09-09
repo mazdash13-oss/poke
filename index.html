@@ -51,7 +51,7 @@
         const cand = ["low", "avg1", "trend", "avg", "avg7", "avg30"].map((k) => cm[k]).filter((v) => typeof v === "number" && v > 0);
         if (cand.length) {
           const low = Math.min(...cand), high = Math.max(...cand);
-          return { low, high, value: cm.trend ?? cm.avg ?? high, cur: "€", src: "Cardmarket" };
+          return { low, high, value: cm.trend ?? cm.avg ?? high, cur: "€", src: "Cardmarket", url: typeof cm.url === "string" ? cm.url : null };
         }
       }
       const tp = pricing.tcgplayer;
@@ -62,11 +62,17 @@
         const valid = nums.filter((v) => v > 0);
         if (valid.length) {
           const low = Math.min(...valid), high = Math.max(...valid);
-          return { low, high, value: high, cur: "$", src: "TCGplayer" };
+          return { low, high, value: high, cur: "$", src: "TCGplayer", url: typeof tp.url === "string" ? tp.url : null };
         }
       }
       return null;
     }
+
+    const sourceUrl = (price, card) => {
+      if (price && price.url) return price.url;
+      if (price && price.cur === "$") return `https://www.tcgplayer.com/search/pokemon/product?q=${encodeURIComponent(card.name)}`;
+      return `https://www.cardmarket.com/fr/Pokemon/Products/Search?searchString=${encodeURIComponent(card.name)}`;
+    };
 
     const loadCollection = () => {
       try { return JSON.parse(localStorage.getItem("collection") || "{}"); } catch { return {}; }
@@ -99,19 +105,20 @@
       );
     }
 
-    function PriceButton({ cardId, priceState, onFetch }) {
-      const st = priceState[cardId];
+    function PriceButton({ card, priceState, onFetch }) {
+      const st = priceState[card.id];
       if (st === "loading") return <span style={{ fontSize: 11, color: C.muted }}>prix…</span>;
       if (st === "none") return <span style={{ fontSize: 11, color: C.muted }}>prix indispo</span>;
       if (st && typeof st === "object")
-        return <span style={{ fontSize: 12, color: C.gold, fontWeight: 700 }}>
-          {st.value.toFixed(2)} {st.cur}<span style={{ color: C.muted, fontWeight: 400 }}> · {st.src}</span>
-        </span>;
-      return <button onClick={() => onFetch(cardId)}
+        return <a href={sourceUrl(st, card)} target="_blank" rel="noopener noreferrer"
+          style={{ fontSize: 12, color: C.gold, fontWeight: 700, textDecoration: "none" }}>
+          {st.value.toFixed(2)} {st.cur}<span style={{ color: C.muted, fontWeight: 400 }}> · {st.src} ↗</span>
+        </a>;
+      return <button onClick={() => onFetch(card.id)}
         style={{ fontSize: 11, color: C.base, background: "none", border: "none", cursor: "pointer", padding: 0 }}>voir le prix</button>;
     }
 
-    function CardCell({ card, secret, qty, onQty, priceState, onFetchPrice }) {
+    function CardCell({ card, secret, qty, onQty, priceState, onFetchPrice, setName }) {
       return (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ position: "relative", borderRadius: 10, overflow: "hidden",
@@ -123,8 +130,9 @@
             {qty > 1 && <span style={{ position: "absolute", top: 6, right: 6, background: C.green, color: "#06140c", fontSize: 11, fontWeight: 800, padding: "2px 7px", borderRadius: 6 }}>×{qty}</span>}
           </div>
           <div style={{ fontSize: 11, color: C.muted, fontVariantNumeric: "tabular-nums" }}>#{card.localId} · {card.name}</div>
+          {setName && <div style={{ fontSize: 10, color: C.base }}>{setName}</div>}
           <Qty qty={qty} onChange={(n) => onQty(card, n)} />
-          <PriceButton cardId={card.id} priceState={priceState} onFetch={onFetchPrice} />
+          <PriceButton card={card} priceState={priceState} onFetch={onFetchPrice} />
         </div>
       );
     }
@@ -198,6 +206,7 @@
         </div>
       );
     }
+
     function SetTile({ s, ownedUnique, onOpen }) {
       const [logoOk, setLogoOk] = useState(true);
       const secrets = secretsOf(s); const off = officialOf(s);
@@ -267,7 +276,6 @@
         </div>
       );
     }
-
     function App() {
       const [sets, setSets] = useState([]);
       const [loading, setLoading] = useState(true);
@@ -275,6 +283,10 @@
       const [query, setQuery] = useState("");
       const [asc, setAsc] = useState(true);
       const [tab, setTab] = useState("catalogue");
+      const [searchMode, setSearchMode] = useState("sets");
+      const [cardResults, setCardResults] = useState([]);
+      const [cardLoading, setCardLoading] = useState(false);
+      const [cardError, setCardError] = useState(null);
       const [selected, setSelected] = useState(null);
       const [collection, setCollection] = useState(loadCollection);
       const [priceState, setPriceState] = useState({});
@@ -319,6 +331,25 @@
         });
       }, [collection]);
 
+      // Recherche d'une carte dans tous les sets (mode "cartes")
+      useEffect(() => {
+        if (searchMode !== "cartes") return;
+        const q = query.trim();
+        if (q.length < 2) { setCardResults([]); setCardError(null); setCardLoading(false); return; }
+        let alive = true; setCardLoading(true); setCardError(null);
+        const t = setTimeout(async () => {
+          try {
+            const r = await fetch(`${API}/cards?name=${encodeURIComponent(q)}`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (alive) { setCardResults(Array.isArray(data) ? data.slice(0, 150) : []); setCardLoading(false); }
+          } catch (e) { if (alive) { setCardError(e.message || "réseau"); setCardLoading(false); } }
+        }, 400);
+        return () => { alive = false; clearTimeout(t); };
+      }, [query, searchMode]);
+
+      const findSet = useCallback((cardId) => sets.find((s) => cardId.startsWith(s.id + "-")), [sets]);
+
       const ownedBySet = useMemo(() => {
         const m = {};
         Object.values(collection).forEach((v) => { if (v && v.qty > 0) m[v.setId] = (m[v.setId] || 0) + 1; });
@@ -351,6 +382,9 @@
           border: "none", borderRadius: 9, padding: "9px 0", cursor: "pointer", fontSize: 14, fontWeight: 600 }}>{label}</button>
       );
 
+      const modeBtn = (m) => ({ flex: 1, background: searchMode === m ? C.panel2 : C.panel, color: searchMode === m ? C.text : C.muted,
+        border: `1px solid ${C.line}`, borderRadius: 10, padding: "8px 0", cursor: "pointer", fontSize: 14, fontWeight: 600 });
+
       return (
         <div style={{ background: C.ink, minHeight: "100vh", color: C.text, padding: "20px 14px 48px" }}>
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
@@ -380,24 +414,61 @@
 
             {tab === "catalogue" && (
               <>
-                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-                  <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un set…"
-                    style={{ flex: "1 1 200px", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 14px", color: C.text, fontSize: 14, outline: "none" }} />
-                  <button onClick={() => setAsc((v) => !v)} style={{ background: C.panel, border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontSize: 14 }}>Tri {asc ? "A → Z" : "Z → A"}</button>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <button onClick={() => setSearchMode("sets")} style={modeBtn("sets")}>Sets</button>
+                  <button onClick={() => setSearchMode("cartes")} style={modeBtn("cartes")}>Cartes</button>
                 </div>
-                {loading && <p style={{ color: C.muted }}>Chargement de tous les sets…</p>}
-                {error && (
-                  <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 20 }}>
-                    <p style={{ margin: 0, fontWeight: 600 }}>Les données ne se chargent pas.</p>
-                    <p style={{ margin: "8px 0 0", color: C.muted, fontSize: 14, lineHeight: 1.5 }}>Vérifie ta connexion. L'appli récupère tout en direct depuis TCGdex (api.tcgdex.net). Détail : {error}.</p>
-                  </div>
-                )}
-                {!loading && !error && (
+
+                <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+                  <input value={query} onChange={(e) => setQuery(e.target.value)}
+                    placeholder={searchMode === "cartes" ? "Rechercher une carte…" : "Rechercher un set…"}
+                    style={{ flex: "1 1 200px", background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 14px", color: C.text, fontSize: 14, outline: "none" }} />
+                  {searchMode === "sets" && (
+                    <button onClick={() => setAsc((v) => !v)} style={{ background: C.panel, border: `1px solid ${C.line}`, color: C.text, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontSize: 14 }}>Tri {asc ? "A → Z" : "Z → A"}</button>
+                  )}
+                </div>
+
+                {searchMode === "sets" && (
                   <>
-                    <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>{filtered.length} set{filtered.length > 1 ? "s" : ""}</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
-                      {filtered.map((s) => <SetTile key={s.id} s={s} ownedUnique={ownedBySet[s.id] || 0} onOpen={setSelected} />)}
-                    </div>
+                    {loading && <p style={{ color: C.muted }}>Chargement de tous les sets…</p>}
+                    {error && (
+                      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 20 }}>
+                        <p style={{ margin: 0, fontWeight: 600 }}>Les données ne se chargent pas.</p>
+                        <p style={{ margin: "8px 0 0", color: C.muted, fontSize: 14, lineHeight: 1.5 }}>Vérifie ta connexion. L'appli récupère tout en direct depuis TCGdex (api.tcgdex.net). Détail : {error}.</p>
+                      </div>
+                    )}
+                    {!loading && !error && (
+                      <>
+                        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>{filtered.length} set{filtered.length > 1 ? "s" : ""}</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 14 }}>
+                          {filtered.map((s) => <SetTile key={s.id} s={s} ownedUnique={ownedBySet[s.id] || 0} onOpen={setSelected} />)}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+
+                {searchMode === "cartes" && (
+                  <>
+                    {query.trim().length < 2 && <p style={{ color: C.muted }}>Tape au moins 2 lettres pour chercher une carte (ex. « Dracaufeu »).</p>}
+                    {cardLoading && <p style={{ color: C.muted }}>Recherche…</p>}
+                    {cardError && <p style={{ color: C.muted }}>La recherche a échoué (erreur : {cardError}). Réessaie.</p>}
+                    {!cardLoading && !cardError && query.trim().length >= 2 && (
+                      <>
+                        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>{cardResults.length} carte{cardResults.length > 1 ? "s" : ""}{cardResults.length >= 150 ? " (150 max affichées)" : ""}</div>
+                        <div style={CARDS_GRID}>
+                          {cardResults.map((c) => {
+                            const s = findSet(c.id);
+                            const official = s ? officialOf(s) : 0;
+                            const secret = isSecretCard(c, official);
+                            return <CardCell key={c.id} card={c} secret={secret} setName={s ? s.name : ""} qty={collection[c.id]?.qty ?? 0}
+                              onQty={(card, n) => setQty(card, n, { setId: s ? s.id : "?", setName: s ? s.name : "?", secret })}
+                              priceState={priceState} onFetchPrice={fetchPrice} />;
+                          })}
+                          {cardResults.length === 0 && <p style={{ color: C.muted, gridColumn: "1 / -1" }}>Aucune carte trouvée pour « {query} ».</p>}
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
               </>
